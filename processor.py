@@ -1,9 +1,13 @@
+# Filename: processor.py
+# Version: 2.0.0
+
 import imaplib
 import email
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
-import email.header # Added for robust filename decoding
+from email.mime.base import MIMEBase
+import email.header
 import os
 import time
 import re
@@ -13,263 +17,242 @@ from io import BytesIO
 import logging
 from logging.handlers import RotatingFileHandler
 
-from PIL import Image # Pillow/PIL is now available, but this import is good practice
+from PIL import Image
+from google.cloud import translate_v3 as translate
 
-# 🌟 NEW LOGGING CONFIGURATION 🌟
+# 🌟 LOGGING CONFIGURATION 🌟
+import sys # Add this if it isn't already in your imports
 
-# 1. Define the log file path inside the container
 LOG_FILE_CONTAINER_PATH = '/app/uploader.log'
 
-# 2. Set up the file handler with rotation (max 1MB per file, keep 3 backup files)
+# 1. The File Logger (Keeps a permanent record inside the container)
 file_handler = RotatingFileHandler(
-    LOG_FILE_CONTAINER_PATH,
-    maxBytes=1024 * 1024, # 1 Megabyte
-    backupCount=3
+    LOG_FILE_CONTAINER_PATH, maxBytes=1024 * 1024, backupCount=3
 )
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
-# 3. Apply the configuration to the root logger
+# 2. The Console Logger (Prints to your Docker terminal)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# 3. Attach both to the Root Logger
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.addHandler(file_handler)
-
-
+root_logger.addHandler(console_handler) # <-- This brings the terminal to life!
 
 # --- Configuration from Environment Variables ---
-# IMAP for receiving
 GMX_USER = os.environ.get('GMX_USER')
 GMX_PASS = os.environ.get('GMX_PASS')
 IMAP_SERVER = 'imap.gmx.com'
 
-# SMTP for replying
 SMTP_SERVER = os.environ.get('SMTP_SERVER')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
 SMTP_USER = os.environ.get('SMTP_USER')
 SMTP_PASS = os.environ.get('SMTP_PASS')
-REPLY_FROM_NAME = os.environ.get('REPLY_FROM_NAME')
+REPLY_FROM_NAME = os.environ.get('REPLY_FROM_NAME', 'TechnoShed Services')
 
-# File paths and URL
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR')
 BASE_PUBLIC_URL = os.environ.get('BASE_PUBLIC_URL')
 POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL_SECONDS', 300))
+GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 
 # --- Helper Functions ---
 
 def sanitize_path(path):
-    """Strips illegal characters and prevents directory traversal (../)."""
-    if not path:
-        return ""
-    # Remove dangerous characters and clean up separators
+    """Strips illegal characters and prevents directory traversal."""
+    if not path: return ""
     path = path.strip()
     path = re.sub(r'[\\|:*"<>?]', '', path)
-    path = path.replace('..', '')  # Prevent directory traversal
-    path = path.replace('/', os.sep).replace('\\', os.sep)
-    return path.strip(os.sep)
+    return path.replace('..', '').replace('/', os.sep).replace('\\', os.sep).strip(os.sep)
 
 def generate_qr_code(url):
-    """Generates a QR code image in memory (BytesIO) for the given URL."""
+    """Generates a QR code image in memory."""
     try:
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
-        )
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(url)
         qr.make(fit=True)
-
         img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Save image to a memory buffer
         buffer = BytesIO()
         img.save(buffer, format="PNG")
         buffer.seek(0)
-        return buffer
+        return buffer.getvalue()
     except Exception as e:
-        logging.error(f"Error generating QR code for {url}: {e}")
+        logging.error(f"Error generating QR code: {e}")
         return None
 
-def send_reply(recipient, status, file_url=None, filename=None):
-    """Sends a notification email back to the original sender."""
+def extract_valid_attachments(msg):
+    """Generator that yields (safe_filename, raw_bytes) for valid attachments."""
+    for part in msg.walk():
+        if part.get_content_disposition() != 'attachment':
+            continue
+        raw_filename = part.get_filename()
+        if raw_filename:
+            filename, encoding = email.header.decode_header(raw_filename)[0]
+            if isinstance(filename, bytes):
+                try: filename = filename.decode(encoding or 'utf-8', errors='ignore')
+                except: filename = raw_filename
+            safe_filename = sanitize_path(filename)
+            if safe_filename:
+                yield safe_filename, part.get_payload(decode=True)
+
+# --- The Universal Dispatcher ---
+
+def send_universal_reply(recipient, status, subject_prefix, text_content, html_content, attachments=None):
+    """Sends replies for ANY service."""
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"File Upload Status: {status}"
-    
-    # Use the authenticated SMTP_USER address in the header (required by GMX)
+    msg['Subject'] = f"{subject_prefix}: {status}"
     msg['From'] = f"{REPLY_FROM_NAME} <{SMTP_USER}>" 
     msg['To'] = recipient
-
-    # HTML Body Generation
-    if status == "SUCCESS":
-        text_content = f"Your file '{filename}' was successfully uploaded and is available at: {file_url}"
-        html_content = f"""
-        <html>
-            <body>
-                <h2>✅ Upload Successful!</h2>
-                <p>Your file <strong>{filename}</strong> has been uploaded to the Techshed File Share.</p>
-                <p>You can access or share the file using this secure link:</p>
-                <p><a href="{file_url}">{file_url}</a></p>
-                <p>The QR code for this link is attached to this email.</p>
-                <br>
-                <p>{REPLY_FROM_NAME} File Services</p>
-            </body>
-        </html>
-        """
-        qr_buffer = generate_qr_code(file_url)
-        if qr_buffer:
-            qr_img = MIMEImage(qr_buffer.read(), 'png')
-            qr_img.add_header('Content-Disposition', 'attachment', filename='QR_Code.png')
-            msg.attach(qr_img)
-            
-    else: # Failure or No Attachment
-        text_content = "File upload failed or no valid attachment was found. Please ensure the email contains attachments and the subject is a valid path."
-        html_content = f"""
-        <html>
-            <body>
-                <h2>❌ Upload Failed</h2>
-                <p>{text_content}</p>
-                <p>Please check your subject line and ensure you have attached a file.</p>
-            </body>
-        </html>
-        """
 
     msg.attach(MIMEText(text_content, 'plain'))
     msg.attach(MIMEText(html_content, 'html'))
 
-    # Send the email via GMX SMTP
+    if attachments:
+        for filename, file_bytes, maintype, subtype in attachments:
+            attachment_part = MIMEBase(maintype, subtype)
+            attachment_part.set_payload(file_bytes)
+            email.encoders.encode_base64(attachment_part)
+            attachment_part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+            msg.attach(attachment_part)
+
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(SMTP_USER, SMTP_PASS)
-        # Use SMTP_USER for sending, which is the ONLY address GMX allows.
         server.sendmail(SMTP_USER, recipient, msg.as_string()) 
         server.quit()
-        logging.info(f"Reply sent successfully from {SMTP_USER} to {recipient}.")
+        logging.info(f"Universal reply sent successfully to {recipient}.")
     except Exception as e:
         logging.error(f"SMTP Error sending reply to {recipient}: {e}")
 
+# --- Service Modules ---
 
-def process_email(msg, email_id, M):
-    """Handles parsing, saving, and replying for a single email."""
-    sender = email.utils.parseaddr(msg['from'])[1]
-    
-    # --- 1. Subject Line Handling (Fixes NoneType error) ---
-    raw_subject = msg.get('Subject')
-    if raw_subject is None:
-        subject = "" # Default to empty string if subject is missing
-    else:
-        subject = raw_subject.strip()
-
-    logging.info(f"\n--- Processing Email from {sender} ---")
-    logging.info(f"Subject: {subject if subject else '[BLANK]'}") 
-    
+def handle_file_upload(msg, sender, subject):
+    """Original QR File Share Logic."""
     relative_path = sanitize_path(subject)
     destination_folder = os.path.join(UPLOAD_DIR, relative_path)
+    os.makedirs(destination_folder, exist_ok=True)
     
-    try:
-        os.makedirs(destination_folder, exist_ok=True)
-    except Exception as e:
-        send_reply(sender, "FAILED", status=f"Error creating path: {relative_path}")
-        return False
+    processed = 0
+    for filename, raw_bytes in extract_valid_attachments(msg):
+        filepath = os.path.join(destination_folder, filename)
+        try:
+            with open(filepath, 'wb') as fp:
+                fp.write(raw_bytes)
+            
+            final_url = f"{BASE_PUBLIC_URL}/{relative_path.replace(os.sep, '/')}/{filename}"
+            qr_bytes = generate_qr_code(final_url)
+            
+            html = f"<h2>✅ Upload Successful!</h2><p>File <strong>{filename}</strong> uploaded.</p><p>Link: <a href='{final_url}'>{final_url}</a></p>"
+            attachments = [("QR_Code.png", qr_bytes, 'image', 'png')] if qr_bytes else []
+            
+            send_universal_reply(sender, "SUCCESS", "File Upload", f"Uploaded: {final_url}", html, attachments)
+            processed += 1
+        except Exception as e:
+            logging.error(f"Save failed for {filename}: {e}")
 
-    attachments_processed = 0
+    if processed == 0:
+        send_universal_reply(sender, "FAILED", "File Upload", "No attachments found.", "<h2>❌ Upload Failed</h2><p>No valid files attached.</p>")
+
+def handle_translation(msg, sender, subject):
+    """New GCP Document Translation Logic."""
+    target_code = "ro"
+    target_name = "Romanian"
     
-    for part in msg.walk():
-        # --- 2. Robust Attachment Filtering ---
-        disposition = part.get_content_disposition()
-        
-        # We ONLY want files attached, not inline images (signatures)
-        if disposition != 'attachment':
+    lang_map = {"polish": "pl", "lithuanian": "lt", "bulgarian": "bg", "spanish": "es"}
+    if subject and subject.strip().lower() in lang_map:
+        target_code = lang_map[subject.strip().lower()]
+        target_name = subject.strip().title()
+
+    client = translate.TranslationServiceClient()
+    parent = f"projects/{GCP_PROJECT_ID}/locations/global"
+    
+    processed = 0
+    for filename, raw_bytes in extract_valid_attachments(msg):
+        if not filename.lower().endswith('.docx'):
+            logging.warning(f"Skipping {filename}: Not a .docx file.")
             continue
             
-        raw_filename = part.get_filename()
-        if raw_filename:
-            # Decode the filename header to handle special characters
-            filename, encoding = email.header.decode_header(raw_filename)[0]
+        logging.info(f"Translating {filename} to {target_name}...")
+        try:
+            response = client.translate_document(
+                request={
+                    "parent": parent,
+                    "target_language_code": target_code,
+                    "source_language_code": "en",
+                    "document_input_config": {
+                        "content": raw_bytes,
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    },
+                }
+            )
+            translated_bytes = response.document_translation.byte_stream_outputs[0]
+            new_filename = filename.replace('.docx', f'_{target_code.upper()}.docx')
             
-            if isinstance(filename, bytes):
-                try:
-                    # Safely decode the filename
-                    filename = filename.decode(encoding or 'utf-8', errors='ignore')
-                except:
-                    logging.warning(f"Failed to decode filename: {raw_filename}. Using raw string.")
-                    filename = raw_filename
+            html = f"<h2>✅ Translation Successful!</h2><p>Your document has been translated to {target_name} with formatting preserved.</p>"
+            attachments = [(new_filename, translated_bytes, 'application', 'vnd.openxmlformats-officedocument.wordprocessingml.document')]
             
-            # --- 3. Save the File ---
-            safe_filename = sanitize_path(filename) 
-            
-            if not safe_filename:
-                 logging.warning("Skipping attachment with unresolvable filename.")
-                 continue
+            send_universal_reply(sender, "SUCCESS", "Translation", "Document translated successfully.", html, attachments)
+            processed += 1
+        except Exception as e:
+            logging.error(f"Translation failed: {e}")
+            send_universal_reply(sender, "FAILED", "Translation", f"Error: {e}", f"<h2>❌ Translation Failed</h2><p>{e}</p>")
 
-            filepath = os.path.join(destination_folder, safe_filename)
-            
-            try:
-                with open(filepath, 'wb') as fp:
-                    fp.write(part.get_payload(decode=True))
-            except Exception as e:
-                logging.error(f"Failed to write file {safe_filename} to disk: {e}")
-                continue
-                
-            # Construct the final public URL
-            final_url = f"{BASE_PUBLIC_URL}/{relative_path.replace(os.sep, '/')}/{safe_filename}"
-            
-            logging.info(f"SUCCESS: Saved {safe_filename} to {filepath}") 
-            attachments_processed += 1
-            
-            # Send reply immediately for this file
-            send_reply(sender, "SUCCESS", file_url=final_url, filename=safe_filename)
-            
-    if attachments_processed == 0:
-        send_reply(sender, "FAILED", status="No valid attachment found, or files were filtered (e.g., inline images).")
-        
-    M.store(email_id, '+FLAGS', '\\Seen')
+    if processed == 0:
+        send_universal_reply(sender, "FAILED", "Translation", "No .docx files found.", "<h2>❌ Translation Failed</h2><p>Please attach a valid Word (.docx) file.</p>")
+
+# --- The Router ---
+
+def route_email_service(msg, sender, subject):
+    """Traffic Cop: Routes email based on 'To' address."""
+    raw_to = msg.get('To', '')
+    recipient_address = email.utils.parseaddr(raw_to)[1].lower()
+    logging.info(f"Routing request directed to: {recipient_address}")
+
+    if "uploads@" in recipient_address:
+        handle_file_upload(msg, sender, subject)
+    elif "translations@" in recipient_address:
+        handle_translation(msg, sender, subject)
+    elif "vdat@" in recipient_address:
+        logging.info("VDAT Module pending development.")
+    else:
+        send_universal_reply(sender, "FAILED", "Gateway Error", "Unknown Service.", f"<h2>❌ Unknown Service</h2><p>Address {recipient_address} is invalid.</p>")
+
+# --- Core Loop ---
+
+def process_email(msg, email_id, M):
+    sender = email.utils.parseaddr(msg['from'])[1]
+    subject = (msg.get('Subject') or "").strip()
+
+    logging.info(f"\n--- Processing Email from {sender} ---")
+    route_email_service(msg, sender, subject)
     
+    M.store(email_id, '+FLAGS', '\\Seen')
     logging.info("---------------------------------") 
-    return attachments_processed > 0
+    return True
 
 def check_mail():
-    """Connects to GMX and polls for unread mail."""
-    # ... (IMAP connection and polling logic remains the same)
     try:
         M = imaplib.IMAP4_SSL(IMAP_SERVER)
         M.login(GMX_USER, GMX_PASS)
-        logging.info("Successfully logged into GMX.") 
-        
         M.select('INBOX')
         status, email_ids = M.search(None, 'UNSEEN')
         id_list = email_ids[0].split()
         
-        if not id_list:
-            logging.info(f"No new emails found. Sleeping for {POLL_INTERVAL}s.") 
-            return
-
-        logging.info(f"Found {len(id_list)} new emails to process.") 
-        
-        for email_id in id_list:
-            status, msg_data = M.fetch(email_id, '(RFC822)')
-            if status == 'OK':
-                msg = email.message_from_bytes(msg_data[0][1])
-                process_email(msg, email_id, M)
-            else:
-                 logging.error(f"Error fetching email {email_id}")
-            
+        if id_list:
+            logging.info(f"Found {len(id_list)} new emails.") 
+            for email_id in id_list:
+                status, msg_data = M.fetch(email_id, '(RFC822)')
+                if status == 'OK':
+                    msg = email.message_from_bytes(msg_data[0][1])
+                    process_email(msg, email_id, M)
         M.logout()
-        
-    except imaplib.IMAP4.error as e:
-        logging.error(f"IMAP Login/Connection Error: {e}") 
-        logging.error("Please check GMX user/password or if IMAP is enabled.") 
     except Exception as e:
-        logging.error(f"An unexpected error occurred in check_mail: {e}")
+        logging.error(f"IMAP Error: {e}")
 
 if __name__ == '__main__':
-    if not all([GMX_USER, GMX_PASS, SMTP_SERVER, SMTP_PASS, UPLOAD_DIR, BASE_PUBLIC_URL]):
-        logging.critical("CRITICAL: Missing one or more required environment variables.") 
-        logging.critical("Please ensure GMX/SMTP credentials, UPLOAD_DIR, and BASE_PUBLIC_URL are set.") 
-        exit(1)
-        
-    logging.info(f"Starting Techshed Email Uploader. Target URL: {BASE_PUBLIC_URL}") 
-    
+    logging.info("Starting TechnoShed Rincewind Universal Gateway...") 
     while True:
         check_mail()
         time.sleep(POLL_INTERVAL)
-        

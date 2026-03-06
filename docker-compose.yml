@@ -5,7 +5,7 @@ version: '3.7'
 services:
   email-uploader:
     image: python:3.11 
-    container_name: email_uploader
+    container_name: RincewindsHat
     
     # This single line pulls in your entire .env file automatically
     env_file:
@@ -15,14 +15,14 @@ services:
       # We can leave non-sensitive operational variables here
       POLL_INTERVAL_SECONDS: 300 
       REPLY_FROM_NAME: "TechnoShed Services"
-      GOOGLE_APPLICATION_CREDENTIALS: "/app/translator-key.json"
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/technoshed-translator-6093c556963f.json"
       
     volumes:
-      - /mnt/DockerFiles/nginx-fileshare/email-uploader/processor.py:/app/processor.py
-      - /mnt/DockerFiles/nginx-fileshare/email-uploader/requirements.txt:/app/requirements.txt:ro
+      - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/processor.py:/app/processor.py
+      - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/requirements.txt:/app/requirements.txt:ro
       - /mnt/ssd/HOME/PUBLIC-SHARE:/app/files:rw  
       # Mount the Google Credentials key securely as read-only
-      - /mnt/DockerFiles/nginx-fileshare/email-uploader/translator-key.json:/app/translator-key.json:ro
+      - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/translator-key.json:/app/translator-key.json:ro
       
     command: >
       bash -c "pip install -r /app/requirements.txt && python /app/processor.py"

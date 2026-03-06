@@ -1,3 +1,5 @@
+# Filename: requirements.txt
+# Version: 1.1.0
 qrcode
 Pillow
-
+google-cloud-translate
