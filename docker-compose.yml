@@ -1,0 +1,29 @@
+# Filename: docker-compose.yml
+# Version: 1.3.0
+
+version: '3.7'
+services:
+  email-uploader:
+    image: python:3.11 
+    container_name: email_uploader
+    
+    # This single line pulls in your entire .env file automatically
+    env_file:
+      - .env
+
+    environment:
+      # We can leave non-sensitive operational variables here
+      POLL_INTERVAL_SECONDS: 300 
+      REPLY_FROM_NAME: "TechnoShed Services"
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/translator-key.json"
+      
+    volumes:
+      - /mnt/DockerFiles/nginx-fileshare/email-uploader/processor.py:/app/processor.py
+      - /mnt/DockerFiles/nginx-fileshare/email-uploader/requirements.txt:/app/requirements.txt:ro
+      - /mnt/ssd/HOME/PUBLIC-SHARE:/app/files:rw  
+      # Mount the Google Credentials key securely as read-only
+      - /mnt/DockerFiles/nginx-fileshare/email-uploader/translator-key.json:/app/translator-key.json:ro
+      
+    command: >
+      bash -c "pip install -r /app/requirements.txt && python /app/processor.py"
+    restart: unless-stopped

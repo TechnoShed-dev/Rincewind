@@ -1,0 +1,16 @@
+# Filename: .gitignore
+# Version: 1.0.0
+
+# Environment variables
+.env
+
+# Google Cloud Credentials
+translator-key.json
+*.json
+
+# Python caching
+__pycache__/
+*.pyc
+
+# Uploaded files (don't commit the user payloads!)
+files/
