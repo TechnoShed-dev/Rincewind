@@ -1,32 +1,29 @@
 # Filename: docker-compose.yml
-# Project: Rincewind Swarm Deployment
-# Version: 1.4.4 (Registry Integrated)
+# Version: 1.3.0
 
-version: '3.8'
-
+version: '3.7'
 services:
-  rincewind:
-    # Use the local registry path so all nodes can pull it instantly
-    image: 10.0.1.1:5000/rincewind:v2.4.0
+  email-uploader:
+    image: python:3.11 
+    container_name: Rincewind
+    
+    # This single line pulls in your entire .env file automatically
     env_file:
       - .env
+
     environment:
+      # We can leave non-sensitive operational variables here
       POLL_INTERVAL_SECONDS: 300 
       REPLY_FROM_NAME: "TechnoShed Services"
       GOOGLE_APPLICATION_CREDENTIALS: "/app/technoshed-translator-6093c556963f.json"
+      
     volumes:
-      # These paths must exist on the node where the service runs
       - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/processor.py:/app/processor.py
       - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/requirements.txt:/app/requirements.txt:ro
       - /mnt/ssd/HOME/PUBLIC-SHARE:/app/files:rw  
+      # Mount the Google Credentials key securely as read-only
       - /mnt/ssd/HOME/PROJECTS/TECHNOSHED/Rincewind/technoshed-translator-6093c556963f.json:/app/technoshed-translator-6093c556963f.json:ro
-    networks:
-      - technoshed_mesh
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-
-networks:
-  technoshed_mesh:
-    external: true
+      
+    command: >
+      bash -c "pip install -r /app/requirements.txt && python /app/processor.py"
+    restart: unless-stopped
