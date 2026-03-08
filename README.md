@@ -23,25 +23,32 @@ Persistence: Mounts from the central NFS share (/mnt/ssd/) for real-time code up
 
 🛠 Deployment
 Swarm (Recommended)
-Bash
-# 1. Build and push the baked image
-docker build -t 10.0.1.1:5000/rincewind:v2.4.0 .
-docker push 10.0.1.1:5000/rincewind:v2.4.0
+Before deploying to the cluster, you must build the "baked" image and push it to your internal registry so all nodes can access it without individual build times.
 
-# 2. Deploy the stack
+Bash
+# 1. Build and push the baked image to your local registry
+docker build -t <<MANAGER_IP>>:5000/rincewind:v2.4.0 .
+docker push <<MANAGER_IP>>:5000/rincewind:v2.4.0
+
+# 2. Deploy the stack to the cluster
 docker stack deploy -c docker-compose.yml rincewind
 Standalone (Legacy)
-For single-node testing, use the provided legacy compose file:
+For single-node testing or non-Swarm environments, use the provided legacy compose file:
 
 Bash
 docker-compose -f docker-compose-standalone.yml up -d
 📂 Repository Structure
-processor.py: The main Python engine (v2.4.0).
+processor.py: The main Python engine (v2.4.0) featuring the heartbeat and multi-lane routing.
 
-Dockerfile: Defines the "baked" environment for fast scaling.
+Dockerfile: Defines the "baked" environment to eliminate startup latency.
 
-docker-compose.yml: Swarm stack definition.
+docker-compose.yml: The production Swarm stack definition.
 
-docker-compose-standalone.yml: Legacy single-container setup.
+docker-compose-standalone.yml: A legacy configuration for standalone container deployment.
 
-.env.example: Template for required API keys and credentials.
+.env.example: A template for your environment variables (GCP, GMX, and SMTP2GO credentials).
+
+🔐 Security SOP
+Credentials: Never commit your .env or Google Cloud .json keys to the repository [cite: 2025-12-05].
+
+Paths: Ensure your local NFS mount paths in docker-compose.yml match your specific environment (e.g., <<STORAGE_PATH>>).
